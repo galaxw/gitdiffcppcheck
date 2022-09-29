@@ -1,0 +1,175 @@
+diff --git a/Lib/test/test_dbm_gnu.py b/Lib/test/test_dbm_gnu.py
+index 4eaa0f474b..73602cab51 100644
+--- a/Lib/test/test_dbm_gnu.py
++++ b/Lib/test/test_dbm_gnu.py
+@@ -118,6 +118,20 @@ def test_context_manager(self):
+         self.assertEqual(str(cm.exception),
+                          "GDBM object has already been closed")
+ 
++    def test_bool_empty(self):
++        with gdbm.open(filename, 'c') as db:
++            self.assertFalse(bool(db))
++
++    def test_bool_not_empty(self):
++        with gdbm.open(filename, 'c') as db:
++            db['a'] = 'b'
++            self.assertTrue(bool(db))
++
++    def test_bool_on_closed_db_raises(self):
++        with gdbm.open(filename, 'c') as db:
++            db['a'] = 'b'
++        self.assertRaises(gdbm.error, bool, db)
++
+     def test_bytes(self):
+         with gdbm.open(filename, 'c') as db:
+             db[b'bytes key \xbd'] = b'bytes value \xbd'
+diff --git a/Lib/test/test_dbm_ndbm.py b/Lib/test/test_dbm_ndbm.py
+index e57d9cab11..8f37e3cc62 100644
+--- a/Lib/test/test_dbm_ndbm.py
++++ b/Lib/test/test_dbm_ndbm.py
+@@ -133,6 +133,20 @@ def test_open_with_bytes_path(self):
+     def test_open_with_pathlib_bytes_path(self):
+         dbm.ndbm.open(os_helper.FakePath(os.fsencode(self.filename)), "c").close()
+ 
++    def test_bool_empty(self):
++        with dbm.ndbm.open(self.filename, 'c') as db:
++            self.assertFalse(bool(db))
++
++    def test_bool_not_empty(self):
++        with dbm.ndbm.open(self.filename, 'c') as db:
++            db['a'] = 'b'
++            self.assertTrue(bool(db))
++
++    def test_bool_on_closed_db_raises(self):
++        with dbm.ndbm.open(self.filename, 'c') as db:
++            db['a'] = 'b'
++        self.assertRaises(dbm.ndbm.error, bool, db)
++
+ 
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/Lib/test/test_unittest/testmock/testpatch.py b/Lib/test/test_unittest/testmock/testpatch.py
+index 93ec0ca4be..8ceb5d973e 100644
+--- a/Lib/test/test_unittest/testmock/testpatch.py
++++ b/Lib/test/test_unittest/testmock/testpatch.py
+@@ -1923,7 +1923,7 @@ def test_dotted_but_module_not_loaded(self):
+             del sys.modules['test.test_unittest.testmock.support']
+             del sys.modules['test.test_unittest.testmock']
+             del sys.modules['test.test_unittest']
+-            del sys.modules['unittest']
++            del sys.modules['test']
+ 
+             # now make sure we can patch based on a dotted path:
+             @patch('test.test_unittest.testmock.support.X')
+diff --git a/Misc/NEWS.d/next/Library/2022-09-08-20-12-48.gh-issue-46412.r_cfTh.rst b/Misc/NEWS.d/next/Library/2022-09-08-20-12-48.gh-issue-46412.r_cfTh.rst
+new file mode 100644
+index 0000000000..27fcd0328b
+--- /dev/null
++++ b/Misc/NEWS.d/next/Library/2022-09-08-20-12-48.gh-issue-46412.r_cfTh.rst
+@@ -0,0 +1 @@
++Improve performance of ``bool(db)`` for large ndb/gdb databases. Previously this would call ``len(db)`` which would iterate over all keys -- the answer (empty or not) is known after the first key.
+diff --git a/Misc/NEWS.d/next/Tests/2022-09-08-18-31-26.gh-issue-96624.5cANM1.rst b/Misc/NEWS.d/next/Tests/2022-09-08-18-31-26.gh-issue-96624.5cANM1.rst
+new file mode 100644
+index 0000000000..2d1bcc03e1
+--- /dev/null
++++ b/Misc/NEWS.d/next/Tests/2022-09-08-18-31-26.gh-issue-96624.5cANM1.rst
+@@ -0,0 +1 @@
++Fixed the failure of repeated runs of ``test.test_unittest`` caused by side effects in ``test_dotted_but_module_not_loaded``.
+diff --git a/Modules/_dbmmodule.c b/Modules/_dbmmodule.c
+index 5913b03479..9c83e380af 100644
+--- a/Modules/_dbmmodule.c
++++ b/Modules/_dbmmodule.c
+@@ -130,6 +130,37 @@ dbm_length(dbmobject *dp)
+     return dp->di_size;
+ }
+ 
++static int
++dbm_bool(dbmobject *dp)
++{
++    _dbm_state *state = PyType_GetModuleState(Py_TYPE(dp));
++    assert(state != NULL);
++
++    if (dp->di_dbm == NULL) {
++        PyErr_SetString(state->dbm_error, "DBM object has already been closed");
++        return -1;
++    }
++
++    if (dp->di_size > 0) {
++        /* Known non-zero size. */
++        return 1;
++    }
++    if (dp->di_size == 0) {
++        /* Known zero size. */
++        return 0;
++    }
++
++    /* Unknown size.  Ensure DBM object has an entry. */
++    datum key = dbm_firstkey(dp->di_dbm);
++    if (key.dptr == NULL) {
++        /* Empty. Cache this fact. */
++        dp->di_size = 0;
++        return 0;
++    }
++    /* Non-empty. Don't cache the length since we don't know. */
++    return 1;
++}
++
+ static PyObject *
+ dbm_subscript(dbmobject *dp, PyObject *key)
+ {
+@@ -416,6 +447,7 @@ static PyType_Slot dbmtype_spec_slots[] = {
+     {Py_mp_length, dbm_length},
+     {Py_mp_subscript, dbm_subscript},
+     {Py_mp_ass_subscript, dbm_ass_sub},
++    {Py_nb_bool, dbm_bool},
+     {0, 0}
+ };
+ 
+diff --git a/Modules/_gdbmmodule.c b/Modules/_gdbmmodule.c
+index e6440fa9cd..a96d32306d 100644
+--- a/Modules/_gdbmmodule.c
++++ b/Modules/_gdbmmodule.c
+@@ -162,6 +162,35 @@ gdbm_length(gdbmobject *dp)
+     return dp->di_size;
+ }
+ 
++static int
++gdbm_bool(gdbmobject *dp)
++{
++    _gdbm_state *state = PyType_GetModuleState(Py_TYPE(dp));
++    if (dp->di_dbm == NULL) {
++        PyErr_SetString(state->gdbm_error, "GDBM object has already been closed");
++        return -1;
++    }
++    if (dp->di_size > 0) {
++        /* Known non-zero size. */
++        return 1;
++    }
++    if (dp->di_size == 0) {
++        /* Known zero size. */
++        return 0;
++    }
++    /* Unknown size.  Ensure DBM object has an entry. */
++    datum key = gdbm_firstkey(dp->di_dbm);
++    if (key.dptr == NULL) {
++        /* Empty. Cache this fact. */
++        dp->di_size = 0;
++        return 0;
++    }
++
++    /* Non-empty. Don't cache the length since we don't know. */
++    free(key.dptr);
++    return 1;
++}
++
+ // Wrapper function for PyArg_Parse(o, "s#", &d.dptr, &d.size).
+ // This function is needed to support PY_SSIZE_T_CLEAN.
+ // Return 1 on success, same to PyArg_Parse().
+@@ -569,6 +598,7 @@ static PyType_Slot gdbmtype_spec_slots[] = {
+     {Py_mp_length, gdbm_length},
+     {Py_mp_subscript, gdbm_subscript},
+     {Py_mp_ass_subscript, gdbm_ass_sub},
++    {Py_nb_bool, gdbm_bool},
+     {Py_tp_doc, (char*)gdbm_object__doc__},
+     {0, 0}
+ };
